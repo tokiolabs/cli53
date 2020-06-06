@@ -35,10 +35,10 @@ Feature: import
     When I run "cli53 import --file tests/geo.txt $domain"
     Then the domain "$domain" export matches file "tests/geo.txt"
 
-  Scenario: I can import a zone with geo ALIAS records 
-    Given I have a domain "$domain"
-    When I run "cli53 import --file tests/geo_alias.txt $domain"
-    Then the domain "$domain" export matches file "tests/geo_alias.txt"
+  # Scenario: I can import a zone with geo ALIAS records 
+  #   Given I have a domain "$domain"
+  #   When I run "cli53 import --file tests/geo_alias.txt $domain"
+  #   Then the domain "$domain" export matches file "tests/geo_alias.txt"
 
   Scenario: I can import a zone with latency extensions
     Given I have a domain "$domain"
@@ -49,6 +49,12 @@ Feature: import
     Given I have a domain "$domain"
     When I run "cli53 import --file tests/weighted.txt $domain"
     Then the domain "$domain" export matches file "tests/weighted.txt"
+
+  @multivalue
+  Scenario: I can import a zone with multivalue answer extensions
+    Given I have a domain "$domain"
+    When I run "cli53 import --file tests/multivalue.txt $domain"
+    Then the domain "$domain" export matches file "tests/multivalue.txt"
 
   Scenario: I can import a zone with alias extensions
     Given I have a domain "$domain"
@@ -71,8 +77,8 @@ Feature: import
     When I run "cli53 import --file tests/replace1.txt $domain"
     And I run "cli53 import --replace --file tests/replace2.txt --dry-run $domain"
     Then the output contains "Dry-run"
-    And the output contains "+ mail.$domain. A"
-    And the output contains "- mail.$domain. A"
+    And the output contains "+ mail.$domain.	86400	IN	A	10.0.0.4"
+    And the output contains "- mail.$domain.	86400	IN	A	10.0.0.2"
 
   Scenario: I can import dry-run (no changes)
     Given I have a domain "$domain"
@@ -95,4 +101,10 @@ Feature: import
     Given I have a domain "$domain"
     When I run "cli53 import --file tests/replace3.txt $domain"
     And I run "cli53 import --replace --file tests/replace3.txt $domain"
+    Then the output contains "0 changes"
+
+  Scenario: I can import a zone as case-insensitive
+    Given I have a domain "$domain"
+    When I run "cli53 import --file tests/uppercase.txt $domain"
+    And I run "cli53 import --replace --file tests/uppercase.txt $domain"
     Then the output contains "0 changes"

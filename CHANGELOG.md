@@ -1,3 +1,31 @@
+## 0.8.10 (2017-09-16)
+
+- Add support for multivalue answer routing #241 @lalinsky
+
+## 0.8.9 (2017-08-24)
+
+- Add CCA support #235.
+
+## 0.8.8 (2017-05-06)
+
+- Fix shortenName overzealously removes suffixes #221
+
+## 0.8.7 (2016-11-22)
+
+- Lowercase record names to make imports case-insensitive. Fixes #206
+- Support stdin (-) for import. Fixes #209
+- Paginate instances listing
+
+## 0.8.6 (2016-10-25)
+
+- Improve --dry-run output. #204
+- Fix for quoting in TXT records. #205
+
+## 0.8.5 (2016-09-16)
+
+- Beta: 'instances' command. #119
+- Fix for short zone IDs. #197
+
 ## 0.8.4 (2016-09-10)
 
 - Fix for listing > 100 zones. #196

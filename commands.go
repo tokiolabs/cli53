@@ -86,10 +86,7 @@ func deleteReusableDelegationSet(id string) {
 	fmt.Printf("Deleted reusable delegation set\n")
 }
 
-func purgeZoneRecords(zone *route53.HostedZone, wait bool) {
-	rrsets, err := ListAllRecordSets(r53, *zone.Id)
-	fatalIfErr(err)
-
+func deleteRecordSets(zone *route53.HostedZone, rrsets []*route53.ResourceRecordSet, wait bool) (int, error) {
 	// delete all non-default SOA/NS records
 	changes := []*route53.Change{}
 	for _, rrset := range rrsets {
@@ -103,19 +100,33 @@ func purgeZoneRecords(zone *route53.HostedZone, wait bool) {
 	}
 
 	if len(changes) > 0 {
-		req2 := route53.ChangeResourceRecordSetsInput{
+		req := route53.ChangeResourceRecordSetsInput{
 			HostedZoneId: zone.Id,
 			ChangeBatch: &route53.ChangeBatch{
 				Changes: changes,
 			},
 		}
-		resp, err := r53.ChangeResourceRecordSets(&req2)
-		fatalIfErr(err)
-		fmt.Printf("%d record sets deleted\n", len(changes))
+		resp, err := r53.ChangeResourceRecordSets(&req)
+		if err != nil {
+			return 0, err
+		}
 		if wait {
 			waitForChange(resp.ChangeInfo)
 		}
 	}
+	return len(changes), nil
+}
+
+func purgeZoneRecords(zone *route53.HostedZone, wait bool) {
+	total := 0
+	err := batchListAllRecordSets(r53, *zone.Id, func(rrsets []*route53.ResourceRecordSet) {
+		n, err := deleteRecordSets(zone, rrsets, wait)
+		fatalIfErr(err)
+		total += n
+	})
+	fatalIfErr(err)
+
+	fmt.Printf("%d record sets deleted\n", total)
 }
 
 func deleteZone(name string, purge bool) {
@@ -231,9 +242,39 @@ type importArgs struct {
 	dryrun   bool
 }
 
+func rrsetKey(rrset *route53.ResourceRecordSet) string {
+	key := fmt.Sprintf("%s %s", *rrset.Type, *rrset.Name)
+	if rrset.TTL != nil {
+		key += fmt.Sprintf(" %d", *rrset.TTL)
+	}
+	var rrs []string
+	for _, rr := range rrset.ResourceRecords {
+		rrs = append(rrs, rr.String())
+	}
+	if rrset.AliasTarget != nil {
+		rrs = append(rrs, rrset.AliasTarget.String())
+	}
+	sort.Strings(rrs)
+	for _, rr := range rrs {
+		key += " " + rr
+	}
+	return key
+}
+
 func importBind(args importArgs) {
 	zone := lookupZone(args.name)
-	records := parseBindFile(args.file, *zone.Name)
+
+	var reader io.Reader
+	if args.file == "-" {
+		reader = os.Stdin
+	} else {
+		f, err := os.Open(args.file)
+		fatalIfErr(err)
+		defer f.Close()
+		reader = f
+	}
+
+	records := parseBindFile(reader, args.file, *zone.Name)
 	expandSelfAliases(records, zone)
 
 	grouped := groupRecords(records)
@@ -244,7 +285,7 @@ func importBind(args importArgs) {
 		for _, rrset := range rrsets {
 			if args.editauth || !isAuthRecord(zone, rrset) {
 				rrset.Name = aws.String(unescaper.Replace(*rrset.Name))
-				existing[rrset.String()] = rrset
+				existing[rrsetKey(rrset)] = rrset
 			}
 		}
 	}
@@ -253,7 +294,7 @@ func importBind(args importArgs) {
 	for _, values := range grouped {
 		rrset := ConvertBindToRRSet(values)
 		if rrset != nil && (args.editauth || !isAuthRecord(zone, rrset)) {
-			key := rrset.String()
+			key := rrsetKey(rrset)
 			if _, ok := existing[key]; ok {
 				// no difference - leave it untouched
 				delete(existing, key)
@@ -284,12 +325,16 @@ func importBind(args importArgs) {
 		} else {
 			fmt.Println("Dry-run, changes that would be made:")
 			for _, addition := range additions {
-				rr := addition.ResourceRecordSet
-				fmt.Printf("+ %s %s\n", *rr.Name, *rr.Type)
+				rrs := ConvertRRSetToBind(addition.ResourceRecordSet)
+				for _, rr := range rrs {
+					fmt.Printf("+ %s\n", rr.String())
+				}
 			}
 			for _, deletion := range deletions {
-				rr := deletion.ResourceRecordSet
-				fmt.Printf("- %s %s\n", *rr.Name, *rr.Type)
+				rrs := ConvertRRSetToBind(deletion.ResourceRecordSet)
+				for _, rr := range rrs {
+					fmt.Printf("- %s\n", rr.String())
+				}
 			}
 		}
 	} else {
@@ -346,9 +391,9 @@ func UnexpandSelfAliases(records []dns.RR, zone *route53.HostedZone, full bool) 
 	}
 }
 
-func exportBind(name string, full bool) {
+func exportBind(name string, full bool, writer io.Writer) {
 	zone := lookupZone(name)
-	ExportBindToWriter(r53, zone, full, os.Stdout)
+	ExportBindToWriter(r53, zone, full, writer)
 }
 
 type exportSorter struct {
@@ -419,6 +464,7 @@ type createArgs struct {
 	countryCode     string
 	continentCode   string
 	subdivisionCode string
+	multivalue      bool
 }
 
 func (args createArgs) validate() bool {
@@ -444,6 +490,9 @@ func (args createArgs) validate() bool {
 		extcount += 1
 	}
 	if args.continentCode != "" {
+		extcount += 1
+	}
+	if args.multivalue {
 		extcount += 1
 	}
 	if args.subdivisionCode != "" && args.countryCode == "" {
@@ -496,6 +545,9 @@ func (args createArgs) applyRRSetParams(rrset *route53.ResourceRecordSet) {
 			CountryCode:     aws.String(args.countryCode),
 			SubdivisionCode: aws.String(args.subdivisionCode),
 		}
+	}
+	if args.multivalue {
+		rrset.MultiValueAnswer = aws.Bool(true)
 	}
 }
 
@@ -589,19 +641,17 @@ func createRecords(args createArgs) {
 	}
 }
 
-// Paginate request to get all record sets.
-func ListAllRecordSets(r53 *route53.Route53, id string) (rrsets []*route53.ResourceRecordSet, err error) {
+func batchListAllRecordSets(r53 *route53.Route53, id string, callback func(rrsets []*route53.ResourceRecordSet)) error {
 	req := route53.ListResourceRecordSetsInput{
 		HostedZoneId: &id,
 	}
 
 	for {
-		var resp *route53.ListResourceRecordSetsOutput
-		resp, err = r53.ListResourceRecordSets(&req)
+		resp, err := r53.ListResourceRecordSets(&req)
 		if err != nil {
-			return
+			return err
 		} else {
-			rrsets = append(rrsets, resp.ResourceRecordSets...)
+			callback(resp.ResourceRecordSets)
 			if *resp.IsTruncated {
 				req.StartRecordName = resp.NextRecordName
 				req.StartRecordType = resp.NextRecordType
@@ -611,6 +661,14 @@ func ListAllRecordSets(r53 *route53.Route53, id string) (rrsets []*route53.Resou
 			}
 		}
 	}
+	return nil
+}
+
+// Paginate request to get all record sets.
+func ListAllRecordSets(r53 *route53.Route53, id string) (rrsets []*route53.ResourceRecordSet, err error) {
+	err = batchListAllRecordSets(r53, id, func(results []*route53.ResourceRecordSet) {
+		rrsets = append(rrsets, results...)
+	})
 
 	// unescape wildcards
 	for _, rrset := range rrsets {

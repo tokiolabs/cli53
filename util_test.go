@@ -67,6 +67,9 @@ func TestSplitValues(t *testing.T) {
 }
 
 func TestIsZoneId(t *testing.T) {
+	assert.True(t, isZoneId("Z1DXU7RZRUQ"))
+	assert.True(t, isZoneId("Z1DXU7RZRUQP"))
+	assert.True(t, isZoneId("Z1DXU7RZRUQPI"))
 	assert.True(t, isZoneId("Z1DXU7RZRUQPIP"))
 	assert.True(t, isZoneId("/hostedzone/Z1DXU7RZRUQPIP"))
 	assert.False(t, isZoneId("example.com"))
@@ -87,4 +90,5 @@ func TestShortenName(t *testing.T) {
 	assert.Equal(t, "a", shortenName("a.example.com.", "example.com."))
 	assert.Equal(t, "a.", shortenName("a.", "example.com."))
 	assert.Equal(t, "a.b", shortenName("a.b.example.com.", "example.com."))
+	assert.Equal(t, "fineexample.com.", shortenName("fineexample.com.", "example.com."))
 }

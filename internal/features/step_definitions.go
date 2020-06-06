@@ -24,7 +24,11 @@ import (
 )
 
 func getService() *route53.Route53 {
-	config := aws.Config{}
+	config := aws.Config{
+		Logger: aws.LoggerFunc(func(args ...interface{}) {
+			fmt.Fprintln(os.Stderr, args...)
+		}),
+	}
 	// ensures throttled requests are retried
 	config.MaxRetries = aws.Int(100)
 	return route53.New(session.New(), &config)
@@ -188,6 +192,20 @@ func coverageArgs(args []string) []string {
 	return append([]string{args[0], "-test.coverprofile", coverage}, args[1:]...)
 }
 
+func execute(cmd string, env ...string) {
+	args := safeSplit(cmd)
+	ps := exec.Command("./"+args[0], args[1:]...)
+	ps.Env = append(os.Environ(), env...)
+	out, err := ps.CombinedOutput()
+	runOutput = string(out)
+	if err, ok := err.(*exec.ExitError); ok {
+		waitStatus := err.Sys().(syscall.WaitStatus)
+		retCode = waitStatus.ExitStatus()
+	} else if err != nil {
+		T.Errorf("Error: %s Output: %s", err, out)
+	}
+}
+
 func init() {
 	Before("", func() {
 		// randomize temporary test domain name
@@ -258,19 +276,12 @@ func init() {
 	})
 
 	When(`^I execute "(.+?)"$`, func(cmd string) {
-		cmd = domain(cmd)
-		args := safeSplit(cmd)
-		ps := exec.Command("./"+args[0], args[1:]...)
-		out, err := ps.CombinedOutput()
-		runOutput = string(out)
-		if err, ok := err.(*exec.ExitError); ok {
-			waitStatus := err.Sys().(syscall.WaitStatus)
-			retCode = waitStatus.ExitStatus()
-		} else if err != nil {
-			T.Errorf("Error: %s Output: %s", err, out)
-		} else {
-			runOutput = string(out)
-		}
+		execute(domain(cmd))
+
+	})
+
+	When(`^I execute "(.+?)" with var (.+?) as "(.+?)"$`, func(cmd, name, value string) {
+		execute(domain(cmd), name + "=" + value)
 	})
 
 	Then(`^the domain "(.+?)" is created$`, func(name string) {
@@ -344,6 +355,20 @@ func init() {
 	Then(`^the output contains "(.+?)"$`, func(s string) {
 		s = unquote(domain(s))
 		if !strings.Contains(runOutput, s) {
+			T.Errorf("Output did not contain \"%s\"\nactual: %s", s, runOutput)
+		}
+	})
+
+	Then(`^the output file "(.+?)" contains "(.+?)"$`, func(outputFile string, s string) {
+		outputFile = unquote(outputFile)
+		s = unquote(domain(s))
+		output, err := ioutil.ReadFile(outputFile)
+
+		if err != nil {
+			T.Errorf("Could not read %s", outputFile)
+		}
+
+		if !strings.Contains(string(output), s) {
 			T.Errorf("Output did not contain \"%s\"\nactual: %s", s, runOutput)
 		}
 	})

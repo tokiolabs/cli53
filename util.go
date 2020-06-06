@@ -11,11 +11,11 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/urfave/cli"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
+	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/route53"
 )
@@ -34,19 +34,52 @@ func qualifyName(name, origin string) string {
 	}
 }
 
-func getService(c *cli.Context) *route53.Route53 {
+func getConfig(c *cli.Context) (*aws.Config, error) {
 	debug := c.Bool("debug")
-	profile := c.String("profile")
-	config := aws.Config{}
-	if profile != "" {
-		config.Credentials = credentials.NewSharedCredentials("", profile)
+	endpoint := c.String("endpoint-url")
+	region := os.Getenv("AWS_REGION")
+	// SDK requires region to be set when endpoint-url is set
+	if endpoint != "" && region == "" {
+		return nil, cli.NewExitError("AWS_REGION must be set when using --endpoint-url", 4)
+	}
+	config := aws.Config{
+		Endpoint: &endpoint,
+		Region:   &region,
+		Logger: aws.LoggerFunc(func(args ...interface{}) {
+			fmt.Fprintln(os.Stderr, args...)
+		}),
 	}
 	// ensures throttled requests are retried
 	config.MaxRetries = aws.Int(100)
 	if debug {
 		config.LogLevel = aws.LogLevel(aws.LogDebug)
 	}
-	return route53.New(session.New(), &config)
+	return &config, nil
+}
+
+func getService(c *cli.Context) (*route53.Route53, error) {
+	config, err := getConfig(c)
+	if err != nil {
+		return nil, err
+	}
+	options := session.Options{
+		SharedConfigState: session.SharedConfigEnable,
+		Config:            *config,
+		Profile:           c.String("profile"),
+	}
+	sess, err := session.NewSessionWithOptions(options)
+	if err != nil {
+		return nil, err
+	}
+	roleARN := c.String("role-arn")
+	if roleARN != "" {
+		roleCreds := stscreds.NewCredentials(sess, roleARN)
+		if err != nil {
+			return nil, err
+		}
+		config.Credentials = roleCreds
+	}
+	return route53.New(sess, config), nil
 }
 
 func fatalIfErr(err error) {
@@ -75,7 +108,7 @@ func zoneName(s string) string {
 	return unescaper.Replace(strings.TrimRight(s, "."))
 }
 
-var reZoneId = regexp.MustCompile("^(/hostedzone/)?[A-Z0-9]{12,}$")
+var reZoneId = regexp.MustCompile("^(/hostedzone/)?Z[A-Z0-9]{9,}$")
 
 func isZoneId(s string) bool {
 	return reZoneId.MatchString(s)
@@ -145,11 +178,8 @@ func waitForChange(change *route53.ChangeInfo) {
 func shortenName(name, origin string) string {
 	if name == origin {
 		return "@"
-	} else if strings.HasSuffix(name, origin) {
-		return name[0 : len(name)-len(origin)-1]
-	} else {
-		return name
 	}
+	return strings.TrimSuffix(name, "."+origin)
 }
 
 var reQuotedValue = regexp.MustCompile(`"((?:\\"|[^"])*)"`)

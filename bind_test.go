@@ -268,6 +268,59 @@ var testConvertRRSetToBindTable = []struct {
 	},
 	{
 		Input: route53.ResourceRecordSet{
+			Type: aws.String("CAA"),
+			Name: aws.String("example.com."),
+			ResourceRecords: []*route53.ResourceRecord{
+				&route53.ResourceRecord{
+					Value: aws.String("0 issue \"example.net\""),
+				},
+			},
+			TTL: aws.Int64(86400),
+		},
+		Output: []dns.RR{
+			&dns.CAA{
+				Hdr: dns.RR_Header{
+					Name:   "example.com.",
+					Rrtype: dns.TypeCAA,
+					Class:  dns.ClassINET,
+					Ttl:    uint32(86400),
+				},
+				Flag:  0,
+				Tag:   "issue",
+				Value: "example.net",
+			},
+		},
+	},
+	{
+		Input: route53.ResourceRecordSet{
+			Type: aws.String("NAPTR"),
+			Name: aws.String("example.com."),
+			ResourceRecords: []*route53.ResourceRecord{
+				&route53.ResourceRecord{
+					Value: aws.String(`100 10 "u" "sip+E2U" "!^.*$!sip:information@foo.se!i" .`),
+				},
+			},
+			TTL: aws.Int64(86400),
+		},
+		Output: []dns.RR{
+			&dns.NAPTR{
+				Hdr: dns.RR_Header{
+					Name:   "example.com.",
+					Rrtype: dns.TypeNAPTR,
+					Class:  dns.ClassINET,
+					Ttl:    uint32(86400),
+				},
+				Order:       100,
+				Preference:  10,
+				Flags:       "u",
+				Service:     "sip+E2U",
+				Regexp:      "!^.*$!sip:information@foo.se!i",
+				Replacement: ".",
+			},
+		},
+	},
+	{
+		Input: route53.ResourceRecordSet{
 			Type: aws.String("A"),
 			Name: aws.String("example.com."),
 			AliasTarget: &route53.AliasTarget{
@@ -379,6 +432,28 @@ var testConvertRRSetToBindTable = []struct {
 			&AWSRR{
 				commonA,
 				&WeightedRoute{Weight: 1},
+				nil,
+				"One",
+			},
+		},
+	},
+	{
+		Input: route53.ResourceRecordSet{
+			Type: aws.String("A"),
+			Name: aws.String("a."),
+			ResourceRecords: []*route53.ResourceRecord{
+				&route53.ResourceRecord{
+					Value: aws.String("127.0.0.1"),
+				},
+			},
+			MultiValueAnswer: aws.Bool(true),
+			SetIdentifier:    aws.String("One"),
+			TTL:              aws.Int64(300),
+		},
+		Output: []dns.RR{
+			&AWSRR{
+				commonA,
+				&MultiValueAnswerRoute{},
 				nil,
 				"One",
 			},

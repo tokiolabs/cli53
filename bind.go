@@ -2,8 +2,11 @@ package cli53
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -35,10 +38,8 @@ func parseComment(rr dns.RR, comment string) dns.RR {
 	return rr
 }
 
-func parseBindFile(file, origin string) []dns.RR {
-	rdr, err := os.Open(file)
-	fatalIfErr(err)
-	tokensch := dns.ParseZone(rdr, origin, file)
+func parseBindFile(reader io.Reader, filename, origin string) []dns.RR {
+	tokensch := dns.ParseZone(reader, origin, filename)
 	records := []dns.RR{}
 	for token := range tokensch {
 		if token.Error != nil {
@@ -53,7 +54,7 @@ func parseBindFile(file, origin string) []dns.RR {
 func quoteValues(vals []string) string {
 	var qvals []string
 	for _, val := range vals {
-		qvals = append(qvals, quote(val))
+		qvals = append(qvals, `"`+val+`"`)
 	}
 	return strings.Join(qvals, " ")
 }
@@ -75,6 +76,16 @@ func ConvertBindToRR(record dns.RR) *route53.ResourceRecord {
 		}
 	case *dns.MX:
 		value := fmt.Sprintf("%d %s", record.Preference, record.Mx)
+		return &route53.ResourceRecord{
+			Value: aws.String(value),
+		}
+	case *dns.NAPTR:
+		var value string
+		if record.Replacement == "." {
+			value = fmt.Sprintf("%d %d \"%s\" \"%s\" \"%s\" .", record.Order, record.Preference, record.Flags, record.Service, record.Regexp)
+		} else {
+			value = fmt.Sprintf("%d %d \"%s\" \"%s\" \"\" \"%s\"", record.Order, record.Preference, record.Flags, record.Service, record.Replacement)
+		}
 		return &route53.ResourceRecord{
 			Value: aws.String(value),
 		}
@@ -103,6 +114,11 @@ func ConvertBindToRR(record dns.RR) *route53.ResourceRecord {
 		}
 	case *dns.TXT:
 		value := quoteValues(record.Txt)
+		return &route53.ResourceRecord{
+			Value: aws.String(value),
+		}
+	case *dns.CAA:
+		value := fmt.Sprintf("%d %s \"%s\"", record.Flag, record.Tag, record.Value)
 		return &route53.ResourceRecord{
 			Value: aws.String(value),
 		}
@@ -136,9 +152,10 @@ func ConvertBindToRRSet(records []dns.RR) *route53.ResourceRecordSet {
 		return nil
 	}
 	hdr := records[0].Header()
+	name := strings.ToLower(hdr.Name)
 	rrset := &route53.ResourceRecordSet{
 		Type: aws.String(dns.TypeToString[hdr.Rrtype]),
-		Name: aws.String(hdr.Name),
+		Name: aws.String(name),
 		TTL:  aws.Int64(int64(hdr.Ttl)),
 	}
 
@@ -157,6 +174,8 @@ func ConvertBindToRRSet(records []dns.RR) *route53.ResourceRecordSet {
 				rrset.Region = aws.String(route.Region)
 			case *WeightedRoute:
 				rrset.Weight = aws.Int64(route.Weight)
+			case *MultiValueAnswerRoute:
+				rrset.MultiValueAnswer = aws.Bool(true)
 			}
 			if awsrr.HealthCheckId != nil {
 				rrset.HealthCheckId = awsrr.HealthCheckId
@@ -183,6 +202,17 @@ func ConvertBindToRRSet(records []dns.RR) *route53.ResourceRecordSet {
 
 	return rrset
 }
+
+func absolute(name string) string {
+	// route53 always treats target names as absolute, even when they are
+	// missing the ending period.
+	if !strings.HasSuffix(name, ".") {
+		return name + "."
+	}
+	return name
+}
+
+var reNaptr = regexp.MustCompile(`^([[:digit:]]+) ([[:digit:]]+) "([^"]*)" "([^"]*)" "([^"]*)" "?([^"]+)"?$`)
 
 // ConvertRRSetToBind will convert a ResourceRecordSet to an array of RR entries
 func ConvertRRSetToBind(rrset *route53.ResourceRecordSet) []dns.RR {
@@ -255,7 +285,7 @@ func ConvertRRSetToBind(rrset *route53.ResourceRecordSet) []dns.RR {
 						Class:  dns.ClassINET,
 						Ttl:    uint32(*rrset.TTL),
 					},
-					Target: *rr.Value,
+					Target: absolute(*rr.Value),
 				}
 				ret = append(ret, dnsrr)
 			}
@@ -273,8 +303,31 @@ func ConvertRRSetToBind(rrset *route53.ResourceRecordSet) []dns.RR {
 						Class:  dns.ClassINET,
 						Ttl:    uint32(*rrset.TTL),
 					},
-					Mx:         value,
+					Mx:         absolute(value),
 					Preference: preference,
+				}
+				ret = append(ret, dnsrr)
+			}
+		case "NAPTR":
+			for _, rr := range rrset.ResourceRecords {
+				// parse value
+				naptr := reNaptr.FindStringSubmatch(*rr.Value)
+				order, _ := strconv.Atoi(naptr[1])
+				preference, _ := strconv.Atoi(naptr[2])
+
+				dnsrr := &dns.NAPTR{
+					Hdr: dns.RR_Header{
+						Name:   name,
+						Rrtype: dns.TypeNAPTR,
+						Class:  dns.ClassINET,
+						Ttl:    uint32(*rrset.TTL),
+					},
+					Order:       uint16(order),
+					Preference:  uint16(preference),
+					Flags:       naptr[3],
+					Service:     naptr[4],
+					Regexp:      naptr[5],
+					Replacement: naptr[6],
 				}
 				ret = append(ret, dnsrr)
 			}
@@ -359,7 +412,7 @@ func ConvertRRSetToBind(rrset *route53.ResourceRecordSet) []dns.RR {
 					Priority: priority,
 					Weight:   weight,
 					Port:     port,
-					Target:   target,
+					Target:   absolute(target),
 				}
 				ret = append(ret, dnsrr)
 			}
@@ -377,6 +430,26 @@ func ConvertRRSetToBind(rrset *route53.ResourceRecordSet) []dns.RR {
 				}
 				ret = append(ret, dnsrr)
 			}
+		case "CAA":
+			for _, rr := range rrset.ResourceRecords {
+				var flag uint8
+				var tag string
+				var quotedValue string
+				fmt.Sscanf(*rr.Value, "%d %s %s", &flag, &tag, &quotedValue)
+
+				dnsrr := &dns.CAA{
+					Hdr: dns.RR_Header{
+						Name:   name,
+						Rrtype: dns.TypeCAA,
+						Class:  dns.ClassINET,
+						Ttl:    uint32(*rrset.TTL),
+					},
+					Flag:  flag,
+					Tag:   tag,
+					Value: strings.Trim(quotedValue, `"`),
+				}
+				ret = append(ret, dnsrr)
+			}
 		}
 	}
 
@@ -389,6 +462,8 @@ func ConvertRRSetToBind(rrset *route53.ResourceRecordSet) []dns.RR {
 		route = &LatencyRoute{*rrset.Region}
 	} else if rrset.GeoLocation != nil {
 		route = &GeoLocationRoute{rrset.GeoLocation.CountryCode, rrset.GeoLocation.ContinentCode, rrset.GeoLocation.SubdivisionCode}
+	} else if rrset.MultiValueAnswer != nil && *rrset.MultiValueAnswer {
+		route = &MultiValueAnswerRoute{}
 	}
 	if route != nil {
 		for i, rr := range ret {
